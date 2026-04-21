@@ -1,3 +1,4 @@
+export const prerender = true;
 <!-- src/routes/+layout.svelte -->
 <script>
   import { page } from '$app/stores';
