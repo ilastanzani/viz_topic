@@ -67,11 +67,7 @@
   // Palette anchored at Coarse level (level 3) — must have at least as many entries
   // as there are Coarse clusters so every top-level cluster gets a unique color.
   const COARSE_PALETTE = [
-    '#e6194b','#3cb44b','#4363d8','#f58231','#911eb4',
-    '#42d4f4','#f032e6','#bfef45','#fabed4','#469990',
-    '#dcbeff','#9A6324','#fffac8','#800000','#aaffc3',
-    '#808000','#ffd8b1','#000075','#a9a9a9','#ffffff',
-    '#000000','#e6beff','#008080','#aa6e28','#fffac8',
+    '#8dd3c7','#ffffb3','#bebada','#fb8072','#80b1d3','#fdb462','#b3de69','#fccde5','#d9d9d9','#bc80bd','#ccebc5'
   ];
 
   // Maps every aggCluster leaf id → its Coarse-level color
