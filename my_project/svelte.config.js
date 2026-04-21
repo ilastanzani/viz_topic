@@ -6,10 +6,10 @@ const config = {
     adapter: adapter({
       pages: 'build',
       assets: 'build',
-      fallback: null
+      fallback: 'index.html'
     }),
     paths: {
-      base: process.env.NODE_ENV === 'production' ? '/ilastanzani/viz_topic' : ''
+      base: process.env.NODE_ENV === 'production' ? '/viz_topic' : ''
     }
   }
 };
