@@ -142,8 +142,8 @@
     const clusters = levelClusters;
 
     // Build the two nearest levels of ancestry for every displayed bubble.
-    // The immediate parent controls tight packing; the grandparent controls
-    // the broader spatial neighborhood. Colors remain inherited from level 8.
+    // The immediate parent controls local grouping; coarseId keeps every
+    // descendant anchored to its original level-8 region.
     function leafToClusterMap(level) {
       const map = new Map();
       if (level < 0) return map;
@@ -153,8 +153,8 @@
       return map;
     }
 
+    const coarseMap = leafToClusterMap(0);
     const parentMap = leafToClusterMap(currentLevel - 1);
-    const grandparentMap = leafToClusterMap(currentLevel - 2);
 
     const W = el.clientWidth || 600, H = el.clientHeight || 500;
     const { xS, yS } = makeScales(W, H);
@@ -166,7 +166,7 @@
     _nodes = clusters.map(d => ({
       ...d,
       parentId: parentMap.get(d.ids[0]) ?? d.id,
-      grandparentId: grandparentMap.get(d.ids[0]) ?? null,
+      coarseId: coarseMap.get(d.ids[0]) ?? d.id,
       r:  rOf(d),
       tx: xS(d.cx),
       ty: yS(d.cy),
@@ -241,11 +241,14 @@
 
     if (simulation) simulation.stop();
 
-    // Target-space centroids for the immediate parent and grandparent.
-    // Immediate siblings are pulled together; cousins are gently held in
-    // the same broader region without being forced to touch.
+    // Hierarchical layout:
+    // - siblings are gently attracted toward their immediate-parent centroid;
+    // - every descendant is anchored to the centroid of its level-8 cluster;
+    // - different level-8 groups are kept visibly apart;
+    // - collision padding is positive, so circles never cover one another.
     const parentCenters = new Map();
-    const grandparentCenters = new Map();
+    const coarseCenters = new Map();
+
     if (currentLevel > 0) {
       d3.group(_nodes, d => d.parentId).forEach((groupNodes, parentId) => {
         parentCenters.set(parentId, {
@@ -254,34 +257,22 @@
         });
       });
     }
-    if (currentLevel > 1) {
-      d3.group(_nodes.filter(d => d.grandparentId !== null), d => d.grandparentId)
-        .forEach((groupNodes, grandparentId) => {
-          grandparentCenters.set(grandparentId, {
-            x: d3.mean(groupNodes, n => n.tx) ?? 0,
-            y: d3.mean(groupNodes, n => n.ty) ?? 0
-          });
-        });
-    }
 
-    // Pairwise hierarchical spacing:
-    // - same immediate parent: pack closely, allowing a tiny overlap;
-    // - same grandparent but different parent: keep nearby, not touching;
-    // - different grandparent: maintain a larger visual separation.
-    function hierarchicalSpacing(alpha) {
-      const nodes = _nodes;
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const a = nodes[i], b = nodes[j];
-          const sameParent = currentLevel > 0 && a.parentId === b.parentId;
-          const sameGrandparent = currentLevel > 1 &&
-            a.grandparentId !== null && a.grandparentId === b.grandparentId;
+    d3.group(_nodes, d => d.coarseId).forEach((groupNodes, coarseId) => {
+      coarseCenters.set(coarseId, {
+        x: d3.mean(groupNodes, n => n.tx) ?? 0,
+        y: d3.mean(groupNodes, n => n.ty) ?? 0
+      });
+    });
 
-          const targetDistance = sameParent
-            ? Math.max(1, a.r + b.r - 3)
-            : sameGrandparent
-              ? a.r + b.r + 20
-              : a.r + b.r + 34;
+    // Additional repulsion only between different coarse (8-cluster) groups.
+    // The global collide force below prevents overlap for every pair.
+    function separateCoarseGroups(alpha) {
+      for (let i = 0; i < _nodes.length; i++) {
+        for (let j = i + 1; j < _nodes.length; j++) {
+          const a = _nodes[i];
+          const b = _nodes[j];
+          if (a.coarseId === b.coarseId) continue;
 
           let dx = b.x - a.x;
           let dy = b.y - a.y;
@@ -292,39 +283,34 @@
             distance = Math.hypot(dx, dy);
           }
 
-          const error = distance - targetDistance;
-          // Same-parent pairs are gently packed toward contact; the other
-          // relationships only repel when their minimum spacing is violated.
-          if (sameParent ? Math.abs(error) > 1 : error < 0) {
-            const strength = sameParent ? 0.035 : 0.085;
-            const correction = error * strength * alpha;
-            const vx = (dx / distance) * correction;
-            const vy = (dy / distance) * correction;
-            a.vx += vx;
-            a.vy += vy;
-            b.vx -= vx;
-            b.vy -= vy;
+          const minDistance = a.r + b.r + 16;
+          if (distance < minDistance) {
+            const push = ((minDistance - distance) / distance) * 0.12 * alpha;
+            const vx = dx * push;
+            const vy = dy * push;
+            a.vx -= vx;
+            a.vy -= vy;
+            b.vx += vx;
+            b.vy += vy;
           }
         }
       }
     }
 
     simulation = d3.forceSimulation(_nodes)
-      .force('x', d3.forceX(d => d.tx).strength(0.055))
-      .force('y', d3.forceY(d => d.ty).strength(0.055))
+      .force('x', d3.forceX(d => d.tx).strength(0.10))
+      .force('y', d3.forceY(d => d.ty).strength(0.10))
       .force('parentX', currentLevel > 0
-        ? d3.forceX(d => parentCenters.get(d.parentId)?.x ?? d.tx).strength(0.28)
+        ? d3.forceX(d => parentCenters.get(d.parentId)?.x ?? d.tx).strength(0.10)
         : null)
       .force('parentY', currentLevel > 0
-        ? d3.forceY(d => parentCenters.get(d.parentId)?.y ?? d.ty).strength(0.28)
+        ? d3.forceY(d => parentCenters.get(d.parentId)?.y ?? d.ty).strength(0.10)
         : null)
-      .force('grandparentX', currentLevel > 1
-        ? d3.forceX(d => grandparentCenters.get(d.grandparentId)?.x ?? d.tx).strength(0.10)
-        : null)
-      .force('grandparentY', currentLevel > 1
-        ? d3.forceY(d => grandparentCenters.get(d.grandparentId)?.y ?? d.ty).strength(0.10)
-        : null)
-      .force('hierarchicalSpacing', hierarchicalSpacing)
+      .force('coarseX', d3.forceX(d => coarseCenters.get(d.coarseId)?.x ?? d.tx).strength(0.16))
+      .force('coarseY', d3.forceY(d => coarseCenters.get(d.coarseId)?.y ?? d.ty).strength(0.16))
+      // Positive padding ensures every bubble remains fully visible.
+      .force('collide', d3.forceCollide(d => d.r + 2.5).strength(0.95).iterations(4))
+      .force('separateCoarse', separateCoarseGroups)
       .force('boundary', () => {
         for (const n of _nodes) {
           n.x = Math.max(n.r + 4, Math.min(W - n.r - 4, n.x));
