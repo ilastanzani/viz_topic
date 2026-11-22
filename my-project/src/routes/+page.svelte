@@ -242,85 +242,95 @@
 
     if (simulation) simulation.stop();
 
-    // Hierarchical layout with a preview of the NEXT coarser partition:
-    // 1) bubbles sharing a parent at the next coarser level may overlap by
-    //    only a few pixels, making their future merge visually legible;
-    // 2) bubbles with different parents stay separated;
-    // 3) every bubble is pulled into the region of its level-8 ancestor,
-    //    so colours form compact, clearly separated spatial blocks.
-    const coarseCenters = new Map();
-    buildLevelClusters(0).forEach(cc => {
-      coarseCenters.set(cc.id, { x: xS(cc.cx), y: yS(cc.cy) });
-    });
-
+    // Hierarchical layout: sibling bubbles preview their merge at the next
+    // coarser cut, but remain individually readable. Different parent groups
+    // are kept apart; the 8 coarsest groups form distinct spatial regions.
     const parentCenters = new Map();
     if (currentLevel > 0) {
-      buildLevelClusters(currentLevel - 1).forEach(pc => {
-        parentCenters.set(pc.id, { x: xS(pc.cx), y: yS(pc.cy) });
+      d3.group(_nodes, d => d.parentId).forEach((groupNodes, parentId) => {
+        parentCenters.set(parentId, {
+          x: d3.mean(groupNodes, n => n.tx) ?? 0,
+          y: d3.mean(groupNodes, n => n.ty) ?? 0
+        });
       });
     }
 
-    // Pair-specific collision: only siblings in the NEXT coarser cluster
-    // get a tiny overlap. Different parents (especially different colours)
-    // retain a visible gap. This also prevents one bubble from hiding another.
-    function hierarchicalCollision() {
-      let nodes;
-      function force(alpha) {
-        const OVERLAP_PX = 3;       // total overlap, not per bubble
-        const SAME_COARSE_GAP = 9;  // different parent, same level-8 region
-        const DIFF_COARSE_GAP = 22; // different colour blocks
+    // The coarsest-group anchor is intentionally gentle: it defines the
+    // colour block without dragging every bubble onto one point.
+    const coarseCenters = new Map();
+    d3.group(_nodes, d => d.coarseId).forEach((groupNodes, coarseId) => {
+      coarseCenters.set(coarseId, {
+        x: d3.mean(groupNodes, n => n.tx) ?? 0,
+        y: d3.mean(groupNodes, n => n.ty) ?? 0
+      });
+    });
 
-        for (let i = 0; i < nodes.length; i++) {
-          for (let j = i + 1; j < nodes.length; j++) {
-            const a = nodes[i], b = nodes[j];
+    // Distances are pair-specific. Siblings may overlap by only 1 px in total;
+    // distinct parents remain visibly separated, with a larger moat between
+    // different level-8 colour blocks.
+    const SIBLING_OVERLAP = 1;
+    const LEVEL30_SAME_COARSE_GAP = 12;
+    const SAME_COARSE_GAP = 20;
+    const DIFFERENT_COARSE_GAP = 42;
+
+    function separateDifferentParents() {
+      return function() {
+        for (let i = 0; i < _nodes.length; i++) {
+          for (let j = i + 1; j < _nodes.length; j++) {
+            const a = _nodes[i], b = _nodes[j];
             const sameParent = a.parentId === b.parentId;
-            const sameCoarse = a.coarseId === b.coarseId;
-            const gap = sameParent ? -OVERLAP_PX
-              : sameCoarse ? SAME_COARSE_GAP : DIFF_COARSE_GAP;
-            const minDist = Math.max(1, a.r + b.r + gap);
-
+            // At level 30, sharing one of the 8 coarse groups means same
+            // colour/region, not an already-merged blob: keep a clear gap.
+            // At levels 60 and 100, only immediate siblings get the tiny
+            // preview overlap; all other pairs remain separated.
+            if (sameParent && currentLevel >= 2) continue;
+            const gap = sameParent
+              ? (currentLevel === 1 ? LEVEL30_SAME_COARSE_GAP : 0)
+              : a.coarseId === b.coarseId
+                ? SAME_COARSE_GAP
+                : DIFFERENT_COARSE_GAP;
+            const minDist = a.r + b.r + gap;
             let dx = b.x - a.x;
             let dy = b.y - a.y;
-            let dist2 = dx * dx + dy * dy;
-            if (dist2 < 1e-6) {
-              // Stable tiny jitter avoids division by zero for coincident seeds.
-              dx = ((i * 17 + j * 13) % 5) - 2 || 1;
-              dy = ((i * 11 + j * 19) % 5) - 2 || -1;
-              dist2 = dx * dx + dy * dy;
+            let dist = Math.hypot(dx, dy);
+            if (dist < 0.001) {
+              // Deterministic direction for coincident starting positions.
+              dx = ((i * 17 + j * 13) % 7) - 3 || 1;
+              dy = ((i * 11 + j * 19) % 7) - 3 || -1;
+              dist = Math.hypot(dx, dy);
             }
-            const dist = Math.sqrt(dist2);
             if (dist >= minDist) continue;
-
-            const push = ((minDist - dist) / dist) * 0.42 * alpha;
-            const vx = dx * push;
-            const vy = dy * push;
-            a.vx -= vx; a.vy -= vy;
-            b.vx += vx; b.vy += vy;
+            const push = (minDist - dist) / dist * 0.32;
+            const px = dx * push;
+            const py = dy * push;
+            a.x -= px; a.y -= py;
+            b.x += px; b.y += py;
           }
         }
-      }
-      force.initialize = _ => { nodes = _; };
-      return force;
+      };
     }
 
     if (simulation) simulation.stop();
 
     simulation = d3.forceSimulation(_nodes)
-      // Keep each bubble close to its original data position without
-      // overriding the hierarchical grouping forces.
-      .force('x', d3.forceX(d => d.tx).strength(0.035))
-      .force('y', d3.forceY(d => d.ty).strength(0.035))
-      // Strong coarse-level anchors make each of the 8 colours one region.
-      .force('coarseX', d3.forceX(d => coarseCenters.get(d.coarseId)?.x ?? d.tx).strength(0.42))
-      .force('coarseY', d3.forceY(d => coarseCenters.get(d.coarseId)?.y ?? d.ty).strength(0.42))
-      // Parent anchors gather only bubbles that will merge at the next cut.
+      // Preserve the initial data arrangement; hierarchy modifies it gently.
+      .force('x', d3.forceX(d => d.tx).strength(0.12))
+      .force('y', d3.forceY(d => d.ty).strength(0.12))
+      // Keep each 8-cluster in its own region, without collapsing its bubbles.
+      .force('coarseX', d3.forceX(d => coarseCenters.get(d.coarseId)?.x ?? d.tx).strength(0.10))
+      .force('coarseY', d3.forceY(d => coarseCenters.get(d.coarseId)?.y ?? d.ty).strength(0.10))
+      // Pull future siblings together modestly; collision preserves their shape.
       .force('parentX', currentLevel > 0
-        ? d3.forceX(d => parentCenters.get(d.parentId)?.x ?? d.tx).strength(0.24)
+        ? d3.forceX(d => parentCenters.get(d.parentId)?.x ?? d.tx).strength(0.10)
         : null)
       .force('parentY', currentLevel > 0
-        ? d3.forceY(d => parentCenters.get(d.parentId)?.y ?? d.ty).strength(0.24)
+        ? d3.forceY(d => parentCenters.get(d.parentId)?.y ?? d.ty).strength(0.10)
         : null)
-      .force('hierarchicalCollision', hierarchicalCollision())
+      // Strong physical collision: sibling overlap is capped at 1 px total.
+      .force('collide', d3.forceCollide(d => Math.max(2, d.r - SIBLING_OVERLAP / 2))
+        .strength(1).iterations(9))
+      // Extra spacing applies only across different next-level parents.
+      .force('separateParents', currentLevel > 0 ? separateDifferentParents() : null)
       .force('boundary', () => {
         for (const n of _nodes) {
           n.x = Math.max(n.r + 4, Math.min(W - n.r - 4, n.x));
