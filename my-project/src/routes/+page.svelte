@@ -141,9 +141,10 @@
     if (!el) return;
     const clusters = levelClusters;
 
-    // Build the two nearest levels of ancestry for every displayed bubble.
-    // The immediate parent controls local grouping; coarseId keeps every
-    // descendant anchored to its original level-8 region.
+    // Every displayed bubble knows both its immediate parent (the cluster
+    // it will merge into at the next coarser cut) and its level-8 ancestor.
+    // The former controls the small preview overlap; the latter defines the
+    // large, spatially separated colour regions.
     function leafToClusterMap(level) {
       const map = new Map();
       if (level < 0) return map;
@@ -241,85 +242,94 @@
 
     if (simulation) simulation.stop();
 
-    // Hierarchical layout:
-    // - siblings are gently attracted toward their immediate-parent centroid;
-    // - every descendant is anchored to the centroid of its level-8 cluster;
-    // - different level-8 groups are kept visibly apart;
-    // - collision padding is positive, so circles never cover one another.
-    const parentCenters = new Map();
+    // Hierarchical layout with a preview of the NEXT coarser partition:
+    // 1) bubbles sharing a parent at the next coarser level may overlap by
+    //    only a few pixels, making their future merge visually legible;
+    // 2) bubbles with different parents stay separated;
+    // 3) every bubble is pulled into the region of its level-8 ancestor,
+    //    so colours form compact, clearly separated spatial blocks.
     const coarseCenters = new Map();
+    buildLevelClusters(0).forEach(cc => {
+      coarseCenters.set(cc.id, { x: xS(cc.cx), y: yS(cc.cy) });
+    });
 
+    const parentCenters = new Map();
     if (currentLevel > 0) {
-      d3.group(_nodes, d => d.parentId).forEach((groupNodes, parentId) => {
-        parentCenters.set(parentId, {
-          x: d3.mean(groupNodes, n => n.tx) ?? 0,
-          y: d3.mean(groupNodes, n => n.ty) ?? 0
-        });
+      buildLevelClusters(currentLevel - 1).forEach(pc => {
+        parentCenters.set(pc.id, { x: xS(pc.cx), y: yS(pc.cy) });
       });
     }
 
-    d3.group(_nodes, d => d.coarseId).forEach((groupNodes, coarseId) => {
-      coarseCenters.set(coarseId, {
-        x: d3.mean(groupNodes, n => n.tx) ?? 0,
-        y: d3.mean(groupNodes, n => n.ty) ?? 0
-      });
-    });
+    // Pair-specific collision: only siblings in the NEXT coarser cluster
+    // get a tiny overlap. Different parents (especially different colours)
+    // retain a visible gap. This also prevents one bubble from hiding another.
+    function hierarchicalCollision() {
+      let nodes;
+      function force(alpha) {
+        const OVERLAP_PX = 3;       // total overlap, not per bubble
+        const SAME_COARSE_GAP = 9;  // different parent, same level-8 region
+        const DIFF_COARSE_GAP = 22; // different colour blocks
 
-    // Additional repulsion only between different coarse (8-cluster) groups.
-    // The global collide force below prevents overlap for every pair.
-    function separateCoarseGroups(alpha) {
-      for (let i = 0; i < _nodes.length; i++) {
-        for (let j = i + 1; j < _nodes.length; j++) {
-          const a = _nodes[i];
-          const b = _nodes[j];
-          if (a.coarseId === b.coarseId) continue;
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const a = nodes[i], b = nodes[j];
+            const sameParent = a.parentId === b.parentId;
+            const sameCoarse = a.coarseId === b.coarseId;
+            const gap = sameParent ? -OVERLAP_PX
+              : sameCoarse ? SAME_COARSE_GAP : DIFF_COARSE_GAP;
+            const minDist = Math.max(1, a.r + b.r + gap);
 
-          let dx = b.x - a.x;
-          let dy = b.y - a.y;
-          let distance = Math.hypot(dx, dy);
-          if (distance < 0.01) {
-            dx = ((i * 17 + j * 13) % 7) - 3 || 1;
-            dy = ((i * 11 + j * 19) % 7) - 3 || 1;
-            distance = Math.hypot(dx, dy);
-          }
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let dist2 = dx * dx + dy * dy;
+            if (dist2 < 1e-6) {
+              // Stable tiny jitter avoids division by zero for coincident seeds.
+              dx = ((i * 17 + j * 13) % 5) - 2 || 1;
+              dy = ((i * 11 + j * 19) % 5) - 2 || -1;
+              dist2 = dx * dx + dy * dy;
+            }
+            const dist = Math.sqrt(dist2);
+            if (dist >= minDist) continue;
 
-          const minDistance = a.r + b.r + 16;
-          if (distance < minDistance) {
-            const push = ((minDistance - distance) / distance) * 0.12 * alpha;
+            const push = ((minDist - dist) / dist) * 0.42 * alpha;
             const vx = dx * push;
             const vy = dy * push;
-            a.vx -= vx;
-            a.vy -= vy;
-            b.vx += vx;
-            b.vy += vy;
+            a.vx -= vx; a.vy -= vy;
+            b.vx += vx; b.vy += vy;
           }
         }
       }
+      force.initialize = _ => { nodes = _; };
+      return force;
     }
 
+    if (simulation) simulation.stop();
+
     simulation = d3.forceSimulation(_nodes)
-      .force('x', d3.forceX(d => d.tx).strength(0.10))
-      .force('y', d3.forceY(d => d.ty).strength(0.10))
+      // Keep each bubble close to its original data position without
+      // overriding the hierarchical grouping forces.
+      .force('x', d3.forceX(d => d.tx).strength(0.035))
+      .force('y', d3.forceY(d => d.ty).strength(0.035))
+      // Strong coarse-level anchors make each of the 8 colours one region.
+      .force('coarseX', d3.forceX(d => coarseCenters.get(d.coarseId)?.x ?? d.tx).strength(0.42))
+      .force('coarseY', d3.forceY(d => coarseCenters.get(d.coarseId)?.y ?? d.ty).strength(0.42))
+      // Parent anchors gather only bubbles that will merge at the next cut.
       .force('parentX', currentLevel > 0
-        ? d3.forceX(d => parentCenters.get(d.parentId)?.x ?? d.tx).strength(0.10)
+        ? d3.forceX(d => parentCenters.get(d.parentId)?.x ?? d.tx).strength(0.24)
         : null)
       .force('parentY', currentLevel > 0
-        ? d3.forceY(d => parentCenters.get(d.parentId)?.y ?? d.ty).strength(0.10)
+        ? d3.forceY(d => parentCenters.get(d.parentId)?.y ?? d.ty).strength(0.24)
         : null)
-      .force('coarseX', d3.forceX(d => coarseCenters.get(d.coarseId)?.x ?? d.tx).strength(0.16))
-      .force('coarseY', d3.forceY(d => coarseCenters.get(d.coarseId)?.y ?? d.ty).strength(0.16))
-      // Positive padding ensures every bubble remains fully visible.
-      .force('collide', d3.forceCollide(d => d.r + 2.5).strength(0.95).iterations(4))
-      .force('separateCoarse', separateCoarseGroups)
+      .force('hierarchicalCollision', hierarchicalCollision())
       .force('boundary', () => {
         for (const n of _nodes) {
           n.x = Math.max(n.r + 4, Math.min(W - n.r - 4, n.x));
           n.y = Math.max(n.r + 4, Math.min(H - n.r - 4, n.y));
         }
       })
-      .alphaDecay(0.05)
-      .alphaMin(0.03)
-      .velocityDecay(0.6)
+      .alphaDecay(0.045)
+      .alphaMin(0.025)
+      .velocityDecay(0.48)
       .on('tick', () => {
         circles.attr('cx', d => Math.round(d.x * 2) / 2).attr('cy', d => Math.round(d.y * 2) / 2);
         positionBlblLabels();
